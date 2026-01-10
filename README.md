@@ -1,0 +1,2 @@
+# nux
+Nushell task runner
