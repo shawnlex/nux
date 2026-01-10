@@ -1,0 +1,430 @@
+#!/usr/bin/env -S nu --stdin
+
+use std/log
+
+const selfpath = path self
+const default_target_file = "nux.nu"
+const version = "0.0.1"
+
+# nux - Nushell Execute: a task runner powered by Nushell
+#
+# Usage:
+#   nux              # show help for all targets in the default ./nux.nu file
+#
+#   nux build        # run the "build" target
+#   nux dev test -v  # run the "dev test" target with a flag
+#
+#   nux math add 1 2         # run the "math add" target, imported by ./nux.nu
+#   nux -t ./math.nu add 1 2 # use ./math.nu module as a standalone target file
+#
+#   nux help dev     # show targets that match "dev" keyword
+#   nux build -h     # show detailed help for the "build" target
+#   nux -i           # interactive mode (nushell session)
+#   nux -i build     # interactive mode (nushell session) and run the "build" target
+#
+# See more: https://github.com/shawnlex/nux
+export def --wrapped main [
+    ...args, # args consisted of nux flags (must in the beginning prefix with -/--), and target name and args
+] {
+    mut flags = {
+        target_file: null,
+        interactive: false,
+        list: false,
+        debug: false,
+        stdin: false,
+        help_nux: false,
+        dry_run: false,
+        version: false,
+        install: false,
+        upgrade_url: null,
+    }
+    mut idx = 0
+
+    # idx is the index of the first non-flag argument
+    while $idx < ($args | length) {
+        let arg = $args | get $idx
+        if not ($arg | str starts-with '-') { break }
+        match $arg {
+            '-t' | '--target-file' => {
+                $idx += 1
+                $flags.target_file = $args | get --optional $idx
+                if $flags.target_file == null {
+                    error make { msg: "target file is required when -t/--target-file is used" }
+                }
+            }
+            '-i' | '--interactive' => { $flags.interactive = true }
+            '-l' | '--list' => { $flags.list = true }
+            '-d' | '--debug' => {
+                $flags.debug = true
+                $env.NU_LOG_LEVEL = "debug"
+            }
+            '-s' | '--stdin' => { $flags.stdin = true }
+            '-H' | '--nux-help' => { $flags.help_nux = true }
+            '-n' | '--dry-run' => { $flags.dry_run = true }
+            '-v' | '--version' => { $flags.version = true }
+            '--install' => { $flags.install = true }
+            '-u' | '--upgrade-url' => {
+                $idx += 1
+                $flags.upgrade_url = $args | get --optional $idx
+                if $flags.upgrade_url == null {
+                    error make { msg: "URL is required when -u/--upgrade-url is used" }
+                }
+            }
+            _ => { error make { msg: $"unknown flag: ($arg). if it's intended for a target, place it after the target name" } }
+        }
+        $idx += 1
+    }
+
+    if $flags.version {
+        print $"nux ($version)"
+        return
+    }
+
+    if $flags.install or $flags.upgrade_url != null {
+        install-nux $flags.upgrade_url
+        return
+    }
+
+    if $flags.help_nux {
+        help-nux
+        let extra = $args | skip $idx
+        if ($extra | length) > 0 {
+            log warning $'ignoring extra arguments: ($extra)'
+        }
+        return
+    }
+
+    let target_args = $args | skip $idx | each { |a| safe-quote-arg $a }
+
+    run-main $flags $target_args
+}
+
+export def run-main [
+    flags: record,    # { target_file: string?, interactive: bool, list: bool }
+    target_args: list,
+] {
+    if $flags.debug {
+        log debug $'flags: ($flags)'
+        log debug $'target_args: ($target_args)'
+    }
+    let custom_tf = $flags.target_file
+    let target_file = if $flags.target_file != null { $flags.target_file } else { find-target-file }
+    let mod_abs_path = if ($target_file | path type) == "absolute" { $target_file } else { pwd | path join $target_file }
+    let mod_name = 'nux'
+    let tf_flag = if $custom_tf != null { $' -t "($custom_tf)"' } else { "" }
+
+    # Reusable overlay clauses
+
+    # load target file as nux, aka. $mod_name
+    let ov_target = $'overlay use --prefix "($mod_abs_path)" as ($mod_name)'
+    # load current module as _nux
+    let ov_nux = $'overlay use --prefix ($selfpath) as _nux'
+
+    if $flags.list {
+        [
+            $ov_target
+            $ov_nux
+            $'_nux list-targets ($mod_name)'
+        ] | run-nu
+        if ($target_args | length) > 0 {
+            log warning 'ignoring target arguments when list is used for nux itself, otherwise place -l/--list after target '
+            log warning $'target arguments: ($target_args)'
+        }
+        return
+    }
+
+    # define `nux help` cmd as if it's from user `nux.nu` target file
+    let def_help_cmd = $"
+# show help for nux targets
+def ($mod_name + ' help' | quote) [keyword = ''] {
+    _nux help '($mod_name)' '($mod_abs_path)'($tf_flag) --keyword $keyword
+}"
+
+    let stdin_flags = if $flags.stdin { [ "$in" "|"] } else { [] }
+    let run_args = [([ ...$stdin_flags $mod_name ...$target_args] | str join " ")]
+
+    # the alias shadows external `nux` cmd once we're inside nux runs
+    # without it, nux may refer to external `nux` cmd instead of the `nux` overlay, causing unintended behavior,
+    # especially when there are `nux.nu` target file along with nu scripts run by `nux -t my_target.nu`
+    let nux_alias = $'alias ($mod_name) = ($mod_name) help'
+    let full_cmd = [
+        "# nux setup"
+        ""
+        $ov_nux
+        $def_help_cmd
+        $ov_target
+        $nux_alias
+        ""
+        "# actual target cmds to run"
+        ...$run_args
+    ]
+
+    if $flags.dry_run {
+        print (color green_bold "dry-run: would execute:")
+        print ($full_cmd | str join "\n")
+        return
+    }
+
+    try {
+        $full_cmd | run-nu --interactive $flags.interactive
+    } catch { |e|
+        exit 1
+    }
+}
+
+const new_nux_shell = '# https://github.com/shawnlex/nux
+
+# build the project
+export def build [] {
+  print "building..."
+}
+
+# test the project
+export def test [
+  --verbose(-v), # verbose mode
+] {
+  if $verbose { print "verbose mode on" }
+  build
+  print "testing..."
+}
+'
+
+# Ask user whether to create a nux.nu
+def try-create-nux-script [] {
+    let target = pwd | path join $default_target_file
+    let choice = [
+        $"Yes\(Y): create a nux.nu at ($target)"
+        "No\(N): never mind"
+    ] | input list --fuzzy $"Create ($default_target_file)?" --index
+    if $choice == 0 {
+        $new_nux_shell | save $target
+        log info $"Nux shell created: ($target)"
+    }
+}
+
+# Find target file by searching upward from cwd
+def find-target-file [] {
+    mut dir = pwd
+    loop {
+        let candidate = $dir | path join $default_target_file
+        if ($candidate | path exists) {
+            return $candidate
+        }
+        let parent = $dir | path dirname
+        if $parent == $dir {
+            print -e $"(color red 'error:') no ($default_target_file) found in current directory or any parent"
+            print -e ""
+            print -e $"(color yellow 'hint:') create a ($default_target_file) file with exported functions as targets:"
+            print -e ""
+            print -e $"  # Build the project"
+            print -e $"  export def build [] {"
+            print -e $"      print \"building...\""
+            print -e $"  }"
+            print -e ""
+            try-create-nux-script
+            exit 1
+        }
+        $dir = $parent
+    }
+}
+
+export def help-nux [] {
+    print (color default_bold "nux [...nux-flags] <target> [...args]")
+    print ""
+    print (color green_bold "Nux Flags:")
+    print $"  (color blue_bold '-t, --target-file') <file>  Use specific target file \(default: nux.nu)"
+    print $"  (color blue_bold '-i, --interactive')        Start nushell session after running target"
+    print $"  (color blue_bold '-l, --list')               List all targets \(compact)"
+    print $"  (color blue_bold '-d, --debug')              Enable debug logging"
+    print $"  (color blue_bold '-n, --dry-run')            Show commands without executing"
+    print $"  (color blue_bold '-s, --stdin')              Pass stdin to target"
+    print $"  (color blue_bold '-H, --nux-help')           Show this help"
+    print $"  (color blue_bold '-v, --version')            Show nux version"
+    print $"  (color blue_bold '--install')                Install nux to PATH"
+    print $"  (color blue_bold '-u, --upgrade-url') <url>  Upgrade nux from URL"
+    print ""
+}
+
+# Install nux to a directory in user's PATH
+# When upgrade_url is provided, fetch from URL instead of using local copy
+def install-nux [upgrade_url?: string] {
+    let mode = if $upgrade_url != null { "upgrade" } else { "install" }
+    print (color green_bold $"nux ($mode)r")
+    print ""
+
+    # Get PATH directories, filter to writable ones
+    let path_dirs = $env.PATH
+        | where { |p| $p | path exists }
+        | where { |dir| (ls -lad $dir | get 0.mode) =~ 'w' }
+
+    if ($path_dirs | is-empty) {
+        print -e (color red "error: no writable directories found in PATH")
+        print -e "Consider adding ~/.local/bin to your PATH"
+        exit 1
+    }
+
+    # Build selection menu
+    print "Select install directory:"
+    $path_dirs | enumerate | each { |it| print $"  ($it.index + 1). ($it.item)" }
+    print ""
+
+    # Get user selection
+    let choice = input "Enter number (or path): " | str trim
+    let install_dir = if ($choice | str starts-with '/') {
+        $choice
+    } else {
+        let idx = ($choice | into int) - 1
+        if $idx < 0 or $idx >= ($path_dirs | length) {
+            print -e (color red "error: invalid selection")
+            exit 1
+        }
+        $path_dirs | get $idx
+    }
+
+    let install_path = $install_dir | path join "nux"
+
+    if $upgrade_url != null {
+        # Fetch from URL
+        print $"Fetching from ($upgrade_url)..."
+        http get $upgrade_url | save -f $install_path
+    } else {
+        # Copy from current script location
+        print $"Installing to ($install_path)..."
+        cp $selfpath $install_path
+    }
+    chmod +x $install_path
+
+    print ""
+    print (color green_bold $"✓ nux ($mode)ed successfully!")
+    print $"  Location: ($install_path)"
+    print $"  Run 'nux -v' to verify"
+}
+
+# Show help with signatures grouped hierarchically
+export def help [
+    name: string = "nux", # nushell module name, default to "nux"
+    description: string = "",
+    --keyword(-k): string = "",  # optional filter keyword (e.g. "dev")
+    --target-file(-t): string = "",
+] {
+    let cmds = match $keyword {
+        "" => (scope commands | where name =~ $'^($name)' and name != $name),
+        _ => (scope commands | where name =~ $'^($name)' and name =~ $keyword),
+    }
+    let aliases = match $keyword {
+        "" => (scope aliases | where name =~ $'^($name)' and name != $name),
+        _ => (scope aliases | where name =~ $'^($name)' and name =~ $keyword),
+    }
+    if ($cmds | length) == 0 and ($aliases | length) == 0 {
+        print -e $"(color red 'error:') no targets found with keyword '($keyword)', module name: '($name)'"
+        exit 1
+    }
+
+    # Header
+    print $description
+    print ""
+    print (color green_bold "Usage:")
+    let tf_arg = if $target_file != "" { $" -t ($target_file)" } else { "" }
+    print ((color default_bold $"  nux($tf_arg) <target> [...args] [-h/--help]") + "\trun a target or show its help")
+    print ((color default_bold $"  nux($tf_arg) [...nux-flags] <target> [...args]") + "\trun a target with nux flags")
+    print ((color default_bold '  nux -H/--nux-help') + "\tshow nux flags")
+    print ""
+
+    # Group by namespace (first word after module name)
+    let base_len = ($name | str length) + 1
+    let grouped = $cmds | each { |c|
+        let suffix = $c.name | str substring $base_len..
+        let parts = $suffix | split row ' '
+        let namespace = if ($parts | length) > 1 { $parts.0 } else { "" }
+        { cmd: $c, namespace: $namespace, suffix: $suffix }
+    } | group-by namespace
+
+    print (color green_bold "Targets:")
+
+    # Print ungrouped first
+    if ("" in $grouped) {
+        for item in ($grouped | get "") {
+            print-target $item.cmd
+        }
+    }
+
+    # Print grouped with namespace headers
+    for ns in ($grouped | columns | where $it != "") {
+        print ""
+        print $"  (color magenta_bold $'[($ns)]')"
+        for item in ($grouped | get $ns) {
+            print-target $item.cmd
+        }
+    }
+
+    # Print aliases
+    if ($aliases | length) > 0 {
+        print ""
+        print (color green_bold "Aliases:")
+        for a in $aliases {
+            let target = $a.name | str substring $base_len..
+            let expansion = $a.expansion | str replace $'^($name) ' ''
+            print $"  (color blue_bold $'nux ($target)') -> ($expansion)"
+        }
+    }
+    print ""
+}
+
+def print-target [cmd: record, indent: string = "  "] {
+    let target = $cmd.name | str replace 'nux ' ''
+    let desc = if $cmd.description != "" { $" - ($cmd.description)" } else { "" }
+    print $"($indent)(color blue_bold $'nux ($target)')($desc)"
+}
+
+# List all targets (compact)
+export def list-targets [name: string = "nux"] {
+    let cmds = scope commands | where name =~ $'^($name)' and name != $name
+    let aliases = scope aliases | where name =~ $'^($name)' and name != $name
+    let base_len = ($name | str length) + 1
+    for c in $cmds {
+        let target = $c.name | str substring $base_len..
+        let desc = if $c.description != "" { $" - ($c.description)" } else { "" }
+        print $"(color blue_bold $target)($desc)"
+    }
+    for a in $aliases {
+        let target = $a.name | str substring $base_len..
+        let expansion = $a.expansion | str replace $'^($name) ' ''
+        print $"(color blue_bold $target) -> ($expansion)"
+    }
+}
+
+# wrap text in ansi color
+def color [c: string, text: string] {
+    $"(ansi $c)($text)(ansi reset)"
+}
+
+# quote text with a given quote character, default to double quotes
+def quote [c = '"'] {
+    $"($c)($in)($c)"
+}
+
+# quote arg if it contains spaces, otherwise return the arg as is
+def safe-quote-arg [arg] {
+    if ($arg | describe) != 'string' {
+        return $arg | to nuon
+    }
+    if $arg =~ "[ \"'\n\r\t]" {
+        $arg | to json
+    } else {
+        $arg
+    }
+}
+
+# join commands and run with nu
+def run-nu [
+    --interactive(-i) = false, # use nu -e (interactive) instead of nu -c
+] {
+    let args = $in | where $it != '--'
+    let cmd = $args | str join "\n"
+    log debug $"running nu with cmd: \n($cmd)\n"
+    if $interactive {
+       nu --stdin -e $cmd
+    } else {
+       nu --stdin -c $cmd
+    }
+}
