@@ -2,6 +2,54 @@
 
 Nux: Nushell Executor — a task runner powered by [Nushell](https://www.nushell.sh/)
 
+Nux supports:
+- running exported functions (aka. targets) in a nushell module `nux.nu`, eg. `nux dev` runs `dev` target where `exported def dev [] {} ` found in `nux.nu`
+- listing all available targets by `nux`
+- running targets in arbitrary nushell modules `nux -t/--target-file my-mod.nu dev`, the default `nux.nu` can be omitted, eg. `nux dev` identical to `nux -t ./nux.nu dev`
+
+TL;DR: `nux` is just a Nu script that loads and executes exported functions in Nu modules with some niceties. 
+
+## Why
+
+You can already run a nushell module as script via `nu my-script.nu dev`, where `my-script.nu` is the script name and `dev` is the target, but 
+- targets must be defined as `def "main dev" [] {} "`
+- hard to compose targets from other scripts. Eg. suppose `exported def "main dep" [] {}` is a target `dep` in `script-b.nu`, to use `dep` in `my-script.nu`, we need to 
+    - reference `dep` as `main dep` if we `use script-b.nu *` with risk of name clashes when `my-script.nu` has targets with same names in dependencies
+    - reference `dep` as `script-b main dep` if we `use script-b[.nu]`, which is cumbersome
+- hard to use functions in Nu REPLs (same reason as above). Being able to iterate on Nu functions in REPLs has been a productivity boost for me.
+- no easy way to list all targets
+
+`nux` breaks the boundary between Nu modules and scripts, so that you can write Nu modules with modularity in mind and easily run them with convenience of a task runner.
+
+## Quick Start
+
+Create a `nux.nu` file in your project root (see [nux.nu](./nux.nu) for a complete example):
+
+```nushell
+# Build the project
+export def build [] {
+    print "building..."
+}
+# now `build` is a target run via `nux build`
+```
+
+Run targets:
+
+```sh
+nux # show all available targets
+nux <target> [flags...] [args...] # generic format
+nux build        # run the "build" target
+nux dev test     # run namespaced target. do not add quotes
+nux test "my-pattern" --verbose # pass flag
+nux dev serve localhost --port 3000 # pass arg: {localhost} & flag port with an interger ≥ 100
+
+nux dt # run an alias, eg dt -> dev test
+nux -t ./math.nu add 3 4 # use non-default target file
+
+nux -i # start a Nu session with targets available
+nux -i build # run build, then stay in Nu session
+```
+
 ## Installation
 
 Requires: [nushell](https://www.nushell.sh/) (`nu`) in PATH.
@@ -36,26 +84,6 @@ cp nux ~/.local/bin/ && chmod +x ~/.local/bin/nux
 
 ```sh
 nux -u https://raw.githubusercontent.com/shawnlex/nux/main/nux
-```
-
-## Quick Start
-
-Create a `nux.nu` file in your project root (see [nux.nu](./nux.nu) for a complete example):
-
-```nushell
-# Build the project
-export def build [] {
-    print "building..."
-}
-```
-
-Run targets:
-
-```sh
-nux              # show all available targets
-nux build        # run the "build" target
-nux dev test     # run namespaced target. do not add quotes
-nux dt           # run an alias, eg dt -> dev test
 ```
 
 ## Usage
@@ -290,11 +318,8 @@ Nux searches for `nux.nu` upward from the current directory.
 Run tests:
 
 ```sh
-nux -t ./tests/nux.nu test
+# NOTE: use `nux` in current repo instead of the one in $PATH
+./nux -t ./tests/nux.nu test
 # or
-cd tests && nux test
+cd tests && ../nux test
 ```
-
-## License
-
-ISC
