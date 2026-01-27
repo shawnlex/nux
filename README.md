@@ -313,6 +313,64 @@ project/
 
 Nux searches for `nux.nu` upward from the current directory.
 
+## Agent Skill
+
+Nux includes an [Agent Skill](https://agentskills.io) that helps Claude Code and other AI tools understand how to work with nux-based projects. When installed, Claude can help you create targets, run tasks, and debug nux configurations.
+
+### Installing the Skill
+
+**Option 1: Project-level (recommended for teams)**
+
+Add the skill directory to your project's `.claude/skills/`:
+
+```sh
+cd /path-to-project-root
+mkdir -p .claude/skills || echo "project skills dir already exists"
+curl -fsSL https://github.com/shawnlex/nux/archive/refs/heads/main.tar.gz \
+  | tar -xz --strip-components=2 -C .claude/skills nux-main/skill/nux
+```
+
+This creates `.claude/skills/nux/SKILL.md` which is automatically available when working in that project.
+
+**Option 2: Manual installation**
+
+1. Download or clone this repository
+2. Copy the `skill/nux/` directory to your project's `.claude/skills/`:
+   ```sh
+   cp -r /path/to/nux/skill/nux .claude/skills/
+   ```
+
+Your project structure should look like:
+```
+your-project/
+├── .claude/
+│   └── skills/
+│       └── nux/
+│           └── SKILL.md
+├── nux.nu
+└── ...
+```
+
+**Option 3: User-global-level**
+
+Same as project level installation, except to replace `/project-root` with `~/`. 
+
+### Using with Claude Code
+
+Once installed, Claude Code will understand nux concepts and can help you:
+
+- Create and modify targets in `nux.nu`
+- Run targets with proper flag and argument syntax
+- Debug target execution issues
+- Set up namespaced targets and aliases
+- Configure interactive mode workflows
+
+Example prompts:
+- "Create a build target that compiles TypeScript"
+- "Add a dev serve target with host and port arguments"
+- "Run the test target with verbose output"
+- "Why is my nux target failing?"
+
 ## Development
 
 Run tests:
